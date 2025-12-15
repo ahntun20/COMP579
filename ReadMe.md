@@ -1,4 +1,4 @@
-# Waypoint-Based Reinforcement Learning for Robot Manipulation Tasks
+# Enhancing Waypoint-Based Reinforcement Learning with Self-Supervised Dense Reward Models 
 
 This repository provides our implementation of Waypoint-Based RL. The videos for experiments can be found [here](https://youtu.be/MMEd-lYfq4Y)
 
