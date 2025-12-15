@@ -17,5 +17,8 @@ task:
   ensemble_sampling_epoch: 250
   averaging_noise_epoch: 400
   rand_reset_epoch: 400
+  Pr: 10
+  Nr: 50
+  ensemble_size: 10
 
   num_eval: 100

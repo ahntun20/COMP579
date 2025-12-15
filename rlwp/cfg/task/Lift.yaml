@@ -12,10 +12,12 @@ task:
   action_space: 0.5
   batch_size: 30
   epoch_wp: 200
-
   exploration_epoch: 75
   ensemble_sampling_epoch: 100
   averaging_noise_epoch: 175
   rand_reset_epoch: 150
+  # SORS periodic update schedule: update period (episodes) and number of gradient steps
+  Pr: 10
+  Nr: 50
 
   num_eval: 100

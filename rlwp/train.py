@@ -13,6 +13,27 @@ import os, sys
 from memory import MyMemory
 from method import Method
 
+# Cross-platform non-blocking keypress check. On Windows use msvcrt; otherwise use select on stdin.
+try:
+    import msvcrt
+    def exit_key_pressed():
+        """Return True if user pressed 'q', 'Q' or ESC (non-blocking)."""
+        if msvcrt.kbhit():
+            ch = msvcrt.getwch()
+            if ch in ('q', 'Q', '\x1b'):
+                return True
+        return False
+except Exception:
+    import select, tty, termios
+    def exit_key_pressed():
+        """Unix fallback: non-blocking check on stdin for 'q' or ESC. May require terminal focus."""
+        dr, _, _ = select.select([sys.stdin], [], [], 0)
+        if dr:
+            ch = sys.stdin.read(1)
+            if ch in ('q', 'Q', '\x1b'):
+                return True
+        return False
+
 
 class train:
     def __init__(self, config):
@@ -30,14 +51,24 @@ class train:
         self.wp_steps = config['task']['env']['wp_steps']
         self.use_latch = config['task']['env']['use_latch']
 
+        # shaped reward parameters (help agent observe successful grasps)
+        self.shaped_grasp_reward = config['task']['task'].get('shaped_grasp_reward', 5.0)
+        self.lift_threshold = config['task']['task'].get('lift_threshold', 0.02)
+
+        # optional debug flags (can set in config later)
+        self.debug_gripper = config.get('debug', {}).get('debug_gripper', False)
+        self.force_grasp = config.get('debug', {}).get('force_grasp', False)
+
         self.batch_size = config['task']['task']['batch_size']
         self.epoch_wp = config['task']['task']['epoch_wp']
         self.rand_reset_epoch = config['task']['task']['rand_reset_epoch']
 
+        # NEW: SORS update schedule (required in config)
+        self.Pr = config['task']['task']['Pr']   # update period in episodes
+        self.Nr = config['task']['task']['Nr']   # number of gradient steps per update
+
         self.train()
 
-
-    
     def reset_env(self, env, get_objs=False):
         obs = env.reset()
         if get_objs:
@@ -70,9 +101,23 @@ class train:
         if timestep < 10:
             full_action = np.array(list(10.*error) + [0.]*(6-len(state)) +[-1.])
         elif time_s >= self.wp_steps - self.gripper_steps:
-            full_action = np.array([0.]*6 + list(gripper_mat[wp_idx]))
+            # gripper commands from trajectory may be small; clamp and optionally force full close
+            g = float(np.array(gripper_mat[wp_idx]).flatten()[0]) if np.array(gripper_mat[wp_idx]).size>0 else 0.0
+            # optionally force full close (1.0) for debug testing
+            if self.force_grasp:
+                g = 1.0
+            # clamp to valid range
+            g = float(np.clip(g, -1.0, 1.0))
+            full_action = np.array([0.]*6 + [g])
         else:
             full_action = np.array(list(10.*error)  +[0.]*(6-len(state)) + [0.])
+
+        if self.debug_gripper:
+            # try to log the last element (gripper) and return it for inspection
+            try:
+                sys.stdout.write(f"t:{timestep} wp:{wp_idx} gripper_cmd:{full_action[-1]:.3f}\n")
+            except Exception:
+                pass
 
         return full_action
 
@@ -86,13 +131,7 @@ class train:
             elif self.env == 'Door' and not self.use_latch:
                 save_name = self.env + 'without_latch/' + self.run_name
         else:
-             save_name = self.env + '/' + self.object + '/' + self.run_name
-
-
-        # save_dir = 'models/' + save_name
-        # if not os.path.exists(save_dir):
-        #     print("MAKING")
-        #     os.makedirs(save_dir)
+            save_name = self.env + '/' + self.object + '/' + self.run_name
 
         controller_config = load_controller_config(default_controller="OSC_POSE")
 
@@ -101,67 +140,69 @@ class train:
             robots=self.robot,
             controller_configs=controller_config,
             has_renderer=self.render,
-            reward_shaping=True,
+            reward_shaping=True,   # R_env (can be made sparse if desired)
             control_freq=10,
             has_offscreen_renderer=False,
             use_camera_obs=False,
             initialization_noise=None,
-            single_object_mode=2,
-            object_type=self.object,
-            use_latch=self.use_latch,
+            # single_object_mode=2,
+            # object_type=self.object,
+            # use_latch=self.use_latch,
         )
 
+        # Start from first waypoint
         wp_id = 1
-
         obs, objs = self.reset_env(env, get_objs=True)
+        agent = Method(
+            state_dim=self.state_dim,
+            objs=objs,
+            wp_id=wp_id,
+            save_name=save_name,
+            config=self.config
+        )
 
-        agent = Method(state_dim=self.state_dim, objs=objs, wp_id=wp_id, save_name=save_name, config=self.config)
-
-        memory = MyMemory()
+        # Global buffer D_tau (persistent across waypoints)
+        # Pre-compute maximum stored trajectory vector length so samples can stack
+        max_traj_len = self.num_wp * self.state_dim + agent.objs_len
+        memory = MyMemory(traj_size=max_traj_len)
 
         run_name = 'runs/ours_' + self.run_name + datetime.datetime.now().strftime("%H-%M")
         writer = SummaryWriter(run_name)
 
+        # Total number of episodes = epoch_wp per waypoint
         EPOCHS = self.epoch_wp * self.num_wp
 
         total_steps = 0
-        for i_episode in tqdm(range(1, EPOCHS)):
-            if i_episode % self.epoch_wp == 0:
-                agent.save_model(save_name)
 
-                wp_id += 1
-                agent = Method(state_dim=self.state_dim, objs=objs, wp_id=wp_id, save_name=save_name, config=self.config)
+        for global_episode in tqdm(range(1, EPOCHS + 1)):
+            # Optional diversity: random reset of one ensemble member (SORS: rand() < 0.05)
+            if (
+                np.random.rand() < 0.05
+                and global_episode < self.rand_reset_epoch
+                and global_episode > 1
+            ):
+                agent.reset_model(np.random.randint(agent.n_models))
 
-                memory = MyMemory()
-
-            i_episode = i_episode%self.epoch_wp
-
-            if np.random.rand()<0.05 and i_episode<self.rand_reset_epoch and i_episode > 1:
-                agent.reset_model(np.random.randint(10))
-
-            episode_reward = 0
+            episode_reward = 0.0
             done, truncated = False, False
             obs, objs = self.reset_env(env, get_objs=True)
 
-            traj_full = agent.traj_opt(i_episode, objs)
+            # Build trajectory using current SORS-style selection rules
+            traj_full = agent.traj_opt(global_episode, objs)
 
             state = self.get_state(obs)
-            traj_mat = np.reshape(traj_full, (wp_id, self.state_dim))[:, :self.state_dim-1] + state
-            gripper_mat = np.reshape(traj_full, (wp_id, self.state_dim))[:, self.state_dim-1:]
-
-            if len(memory) > self.batch_size:
-                for _ in range(100):
-                    critic_loss = agent.update_parameters(memory, self.batch_size)
-                    writer.add_scalar('model/critic_loss', critic_loss, total_steps)
+            traj_mat = np.reshape(traj_full, (wp_id, self.state_dim))[:, :self.state_dim - 1] + state
+            gripper_mat = np.reshape(traj_full, (wp_id, self.state_dim))[:, self.state_dim - 1:]
 
             time_s = 0
-            train_reward = 0
-            for timestep in range(wp_id*self.wp_steps):
+            train_reward = 0.0
+
+            for timestep in range(wp_id * self.wp_steps):
                 if self.render:
                     env.render()
 
                 state = self.get_state(obs)
-                wp_idx = timestep//50
+                wp_idx = timestep // 50
 
                 action = self.get_action(self.env, wp_idx, state, traj_mat, gripper_mat, time_s, timestep)
 
@@ -172,29 +213,63 @@ class train:
                 obs, reward, done, _ = env.step(action)
                 episode_reward += reward
 
-                if timestep//50 == wp_id - 1:
+                # Reward attributed to final waypoint segment
+                if timestep // 50 == wp_id - 1:
                     train_reward += reward
 
                 total_steps += 1
 
+            # D_tau: store (trajectory, env return R_env)
             memory.push(np.concatenate((traj_full, objs)), episode_reward)
-            save_data['episode'].append(i_episode)
+
+            save_data['episode'].append(global_episode)
             save_data['reward'].append(episode_reward)
 
+            # SORS-style periodic reward updates:
+            # if global_episode mod Pr == 0 and |D_tau| > batch_size:
+            #       repeat Nr times: sample minibatch & update ensemble
+            if (global_episode % self.Pr == 0) and (len(memory) > self.batch_size):
+                for _ in range(self.Nr):
+                    critic_loss = agent.update_parameters(memory, self.batch_size)
+                    writer.add_scalar('model/critic_loss', critic_loss, total_steps)
+
+            # Track best trajectory for this waypoint
             if train_reward > agent.best_reward:
                 agent.set_init(traj_full, train_reward)
                 agent.save_model(save_name)
 
-            writer.add_scalar('reward', episode_reward, i_episode)
-            tqdm.write("wp_id: {}, Episode: {}, Reward_full: {}; Reward: {}, Predicted: {}".format(wp_id, i_episode, round(episode_reward, 2), round(train_reward, 2), round(agent.get_avg_reward(traj_full), 2)))
+            writer.add_scalar('reward', episode_reward, global_episode)
+            tqdm.write(
+                "wp_id: {}, GlobalEp: {}, Reward_full: {}; Reward: {}, Predicted: {}".format(
+                    wp_id,
+                    global_episode,
+                    round(episode_reward, 2),
+                    round(train_reward, 2),
+                    round(agent.get_avg_reward(traj_full), 2),
+                )
+            )
 
-            pickle.dump(save_data, open('models/' + save_name + '/data.pkl', 'wb'))
+            # Save reward curve (ensure directory exists)
+            save_dir = os.path.join('models', save_name)
+            if save_dir and not os.path.exists(save_dir):
+                os.makedirs(save_dir, exist_ok=True)
+            pickle.dump(save_data, open(os.path.join(save_dir, 'data.pkl'), 'wb'))
 
+            # At the *end* of each waypoint phase, save ensemble and move to next waypoint
+            if (global_episode % self.epoch_wp == 0) and (wp_id < self.num_wp):
+                agent.save_model(save_name)
+                wp_id += 1
+                # Rebuild agent for next waypoint (R buffer grows via learned_models)
+                agent = Method(
+                    state_dim=self.state_dim,
+                    objs=objs,
+                    wp_id=wp_id,
+                    save_name=save_name,
+                    config=self.config
+                )
+
+        # Final save for last waypoint
+        agent.save_model(save_name)
         exit()
-
-
-
-
-
 
 

@@ -3,12 +3,27 @@ import random
 import torch
 
 class MyMemory:
-    def __init__(self):
+    def __init__(self, traj_size=None):
+        """traj_size: optional fixed size to pad/trim stored trajectory vectors so sample()
+        can stack into a single numpy array. If None, no padding is applied (may fail on stack).
+        """
         self.buffer = []
         self.position = 0
+        self.traj_size = traj_size
 
     # push trajectory, reward pair
     def push(self, traj, reward):
+        # ensure numpy array
+        traj = np.asarray(traj)
+        if self.traj_size is not None:
+            if traj.size < self.traj_size:
+                pad = np.zeros((self.traj_size,), dtype=traj.dtype)
+                pad[:traj.size] = traj
+                traj = pad
+            elif traj.size > self.traj_size:
+                # trim extra elements (shouldn't usually happen)
+                traj = traj[:self.traj_size]
+
         self.buffer.append(None)
         self.buffer[self.position] = (traj, reward)
         self.position += 1

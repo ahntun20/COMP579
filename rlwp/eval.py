@@ -13,6 +13,27 @@ import os, sys
 import random
 from models import RNetwork
 
+# Cross-platform non-blocking keypress check. On Windows use msvcrt; otherwise use select on stdin.
+try:
+    import msvcrt
+    def exit_key_pressed():
+        """Return True if user pressed 'q', 'Q' or ESC (non-blocking)."""
+        if msvcrt.kbhit():
+            ch = msvcrt.getwch()
+            if ch in ('q', 'Q', '\x1b'):
+                return True
+        return False
+except Exception:
+    import select, tty, termios
+    def exit_key_pressed():
+        """Unix fallback: non-blocking check on stdin for 'q' or ESC. May require terminal focus."""
+        dr, _, _ = select.select([sys.stdin], [], [], 0)
+        if dr:
+            ch = sys.stdin.read(1)
+            if ch in ('q', 'Q', '\x1b'):
+                return True
+        return False
+
 
 class Method(object):
     def __init__(self, state_dim, objs, wp_id, save_name, config):
@@ -37,7 +58,14 @@ class Method(object):
             models = []
             for idx in range(self.n_models):
                 critic = RNetwork(wp_id*self.state_dim + len(objs), hidden_dim=self.hidden_size).to(device=self.device)
-                critic.load_state_dict(torch.load(save_dir + '/model_' + str(wp_id) + '_' + str(idx)))
+                # Load state dict with map_location so CPU-only machines can load models saved on CUDA
+                state_path = save_dir + '/model_' + str(wp_id) + '_' + str(idx)
+                # Prefer weights_only=True when available (safer for untrusted files).
+                try:
+                    state_dict = torch.load(state_path, map_location=self.device, weights_only=True)
+                except TypeError:
+                    state_dict = torch.load(state_path, map_location=self.device)
+                critic.load_state_dict(state_dict)
                 models.append(critic)
             self.learned_models.append(models)
 
@@ -108,6 +136,10 @@ class evaluate:
 
         self.n_eval = config['task']['task']['num_eval']
 
+        # optional debug flags
+        self.debug_gripper = config.get('debug', {}).get('debug_gripper', False)
+        self.force_grasp = config.get('debug', {}).get('force_grasp', False)
+
         self.eval()
 
 
@@ -144,7 +176,11 @@ class evaluate:
         if timestep < 10:
             full_action = np.array(list(10.*error) + [0.]*(6-len(state)) +[-1.])
         elif time_s >= self.wp_steps - self.gripper_steps:
-            full_action = np.array([0.]*6 + list(gripper_mat[wp_idx]))
+            g = float(np.array(gripper_mat[wp_idx]).flatten()[0]) if np.array(gripper_mat[wp_idx]).size>0 else 0.0
+            if self.force_grasp:
+                g = 1.0
+            g = float(np.clip(g, -1.0, 1.0))
+            full_action = np.array([0.]*6 + [g])
         else:
             full_action = np.array(list(10.*error)  +[0.]*(6-len(state)) + [0.])
 
@@ -158,8 +194,8 @@ class evaluate:
             if self.env == 'Door' and self.use_latch:
                 save_name = self.env + '/with_latch/' + self.run_name
             elif self.env == 'Door' and not self.use_latch:
-                save_name = self.env + 'without_latch/' + self.run_name
-        else:
+                save_name = self.env + '/   without_latch/' + self.run_name
+        else:  
              save_name = self.env + '/' + self.object + '/' + self.run_name
 
 
@@ -175,9 +211,9 @@ class evaluate:
             has_offscreen_renderer=False,
             use_camera_obs=False,
             initialization_noise=None,
-            single_object_mode=2,
-            object_type=self.object,
-            use_latch=self.use_latch,
+            #single_object_mode=2,
+            #object_type=self.object,
+            #use_latch=self.use_latch,
         )
 
         wp_id = self.num_wp
@@ -206,7 +242,11 @@ class evaluate:
             train_reward = 0
             for timestep in range(wp_id*self.wp_steps):
                 if self.render:
-                    env.render()
+                        env.render()
+                        # allow user to exit early by pressing 'q' or ESC in the console/window
+                        if exit_key_pressed():
+                            print('\nExit key pressed. Exiting evaluation.')
+                            exit(0)
 
                 state = self.get_state(obs)
                 wp_idx = timestep//50
