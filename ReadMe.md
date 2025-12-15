@@ -5,7 +5,7 @@ This repository provides our implementation of Waypoint-Based RL.
 ## System requirement
 I did this project on Anaconda environments in Windows 11. The requirement package was listed in requirement.txt
 
-## Installation
+##  Window Installation
 - Anaconda: https://www.anaconda.com/
 - Robosuite: https://robosuite.ai/docs/installation.html
     + Setting up a Conda environment by installing **Anaconda** and running **conda create -n robosuite python=3.8**
@@ -18,7 +18,7 @@ I did this project on Anaconda environments in Windows 11. The requirement packa
     + Download the MuJoCo version 2.1 binaries for Linux or OSX.
     + Extract the downloaded mujoco210 directory into ~/.mujoco/mujoco210.
 - You might need to install Visual Studio Professional 2019, to make it compatible with Mujuco 2.1 and other softwares to make it run on Window.
-## Installation
+## Project Installation
 Clone the repository using 
 ```bash
 https://github.com/ahntun20/COMP765.git
