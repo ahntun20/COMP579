@@ -21,7 +21,7 @@ I did this project on Anaconda environments in Windows 11. The requirement packa
 ## Project Installation
 Clone the repository using 
 ```bash
-https://github.com/ahntun20/COMP597.git
+https://github.com/ahntun20/COMP579.git
 ```
 
 ## Implementation of rl-waypoints
